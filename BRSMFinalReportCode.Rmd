@@ -1,0 +1,198 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Filtering the data
+
+```{r}
+
+library(tidyverse)
+library(lme4)
+library(emmeans)
+
+all_behave<-read.csv('All_Data_p.csv')
+
+data_for_fitting<-all_behave%>%filter(blocktype!='4')
+data_for_fitting$trialnum<-data_for_fitting$trialnum+1
+
+data_for_fitting$blocktype[data_for_fitting$blocktype=='advice'] = 1
+data_for_fitting$blocktype[data_for_fitting$blocktype=='eavesdrop'] = 2
+data_for_fitting$blocktype[data_for_fitting$blocktype=='self'] = 3
+data_for_fitting$blocktype<-as.numeric(data_for_fitting$blocktype)
+
+
+```
+
+## Permutation test for advise condition
+
+```{r H2a}
+obsMean <- t.test((data_for_fitting%>%filter(rt<20000)%>%filter(trialnum==5)%>%filter(blocktype==1))$rt , (data_for_fitting%>%filter(rt<20000)%>%filter(trialnum==4)%>%filter(blocktype==1))$rt)$statistic
+dataPermTest <- data_for_fitting%>%filter(rt<20000)%>%filter(blocktype == 1)%>%filter(trialnum==4 | trialnum == 5)
+
+
+nsim <- 10000
+num_great = 0
+res_mean <- numeric(nsim)
+i = 1
+for (i in 1:nsim) {
+    perm <- sample(nrow(dataPermTest))
+    bdat <- transform(dataPermTest,rt=rt[perm])
+    res_mean[i] <- t.test(bdat$rt[bdat$trialnum==5], bdat$rt[bdat$trialnum==4])$statistic
+    if(res_mean[i] >= obsMean){
+      num_great = num_great+1
+    }
+}
+res_mean <- c(res_mean,obsMean)
+
+hist(res_mean,col="gray",las=1,main="Permutation tests on reaction time between\n Trial 5 and Trial 4(based on T-test) for Advice", xlab = "t-test Statistic", ylab = "Frequency")
+legend(2, 1500, legend=c("Observed T-value"),
+       col=c("red" ), lty=1, cex=0.8)
+abline(v=obsMean,col="red")
+
+cat("The p-value is : ") 
+print(num_great/nsim)
+
+significancevalue <- sort(res_mean)[nsim-0.0025*nsim]
+cat("The significance value is : ")
+print(significancevalue)
+```
+
+## Permutation tests for observatory condition
+
+```{r H2b}
+
+obsMean <- t.test((data_for_fitting%>%filter(rt<20000)%>%filter(trialnum==5)%>%filter(blocktype==2))$rt , (data_for_fitting%>%filter(rt<20000)%>%filter(trialnum==4)%>%filter(blocktype==2))$rt)$statistic
+dataPermTest <- data_for_fitting%>%filter(rt<20000)%>%filter(blocktype == 2)%>%filter(trialnum==4 | trialnum == 5)
+nsim <- 10000
+num_great = 0
+res_mean <- numeric(nsim)
+i = 1
+for (i in 1:nsim) {
+    perm <- sample(nrow(dataPermTest))
+    bdat <- transform(dataPermTest,rt=rt[perm])
+    res_mean[i] <- t.test(bdat$rt[bdat$trialnum==5], bdat$rt[bdat$trialnum==4])$statistic
+    if(res_mean[i] >= obsMean){
+      num_great = num_great+1
+    }
+}
+res_mean <- c(res_mean,obsMean)
+
+hist(res_mean,col="gray",las=1,main="Permutation tests on reaction time between\n Trial 5 and Trial 4(based on T-test) for Eavesdrop", xlab = "t-test Statistic", ylab = "Frequency")
+legend(3, 1500, legend=c("Observed T-value"),
+       col=c("red" ), lty=1, cex=0.8)
+abline(v=obsMean,col="red")
+
+cat("The p-value is : ") 
+print(num_great/nsim)
+
+significancevalue <- sort(res_mean)[nsim-0.0025*nsim]
+cat("The significance value is : ")
+print(significancevalue)
+```
+
+## Model for hypothesis H3a and H3b
+
+a) The participants often flip choices at the 6th trial if their reward at the 5th trial even after making the choice as suggested by the social input is less than their reward at 4th trial. We tested this using mixed effect logistic regression and then calculated the type 3 ANOVA(chi-square) values for the model parameters.
+
+b) Further the flipping of decision also depends on the condition type and would be different in case of observatory and advisory conditions.
+
+```{r Model H3a and H3b}
+data_for_fitting_1 <- data_for_fitting%>%filter(rt<20000)%>%group_by(id,blocktype)%>%filter(any(trialnum == 5 & choice == 1))%>%reframe(blocktype = mean(blocktype),change4_5 = (reward[trialnum == 5]-(reward[trialnum==4]))<0, flip5_6 = (choice[trialnum == 5] != choice[trialnum == 6]), RGPTS_persecution=mean(RGPTS_persecution), rt_6 = rt[trialnum==6]/60)%>%mutate(across(everything(),~replace_na(.x, 1)))
+
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==1] = "advice"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==2] = "eavesdrop"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==3] = "self"
+
+data_for_fitting_1$blocktype = factor(data_for_fitting_1$blocktype)
+data_for_fitting_1$blocktype = relevel(data_for_fitting_1$blocktype, ref="self")
+
+
+model_short = glmer(flip5_6~change4_5+blocktype*RGPTS_persecution+(1|id),data_for_fitting_1, family = binomial(link = "logit"))
+summary(model_short)
+car::Anova(model_short,type=3)
+emmeans(model_short, pairwise~blocktype)
+```
+
+## Model for hypothesis H4
+
+Reaction time of the participants is often more after they make a wrong choice in previous trial as compared to when the make a right selection. Since wrong selection always doesn't translate into lower rewards, since there is a gaussian overlap between good and bad lake, but when it does translate participants often take more time to evaluate their decision for next trial.
+
+```{r Model H4}
+
+CheckPrev<-function(choices){
+  i = 5
+  list_valid = replicate(length(choices),0)
+  while(i<length(choices)){
+    if(choices[i-1] == 0) {
+      list_valid[i] = TRUE
+    }else{
+      list_valid[i] = FALSE
+    }
+    i = i+1
+  }
+  return(list_valid)
+}
+
+data_for_fitting_1 <- data_for_fitting%>%filter(rt<20000)%>%group_by(id,blocktype)%>%filter(trialnum>=4)%>%reframe(prevChoiceWrong = CheckPrev(choice),blocktype = mean(blocktype), RGPTS_persecution=mean(RGPTS_persecution), rt=rt)
+
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==1] = "advice"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==2] = "eavesdrop"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==3] = "self"
+
+data_for_fitting_1$blocktype = factor(data_for_fitting_1$blocktype)
+data_for_fitting_1$blocktype = relevel(data_for_fitting_1$blocktype, ref="self")
+
+data_for_fitting_1$prevChoiceWrong[data_for_fitting_1$prevChoiceWrong == 0] = FALSE
+data_for_fitting_1$prevChoiceWrong[data_for_fitting_1$prevChoiceWrong == 1] = TRUE
+
+
+rt_model = lmer(rt~prevChoiceWrong*blocktype+(1|id), data_for_fitting_1)
+summary(rt_model)
+car::Anova(rt_model,type=3)
+emmeans(rt_model, pairwise~prevChoiceWrong*blocktype)
+```
+
+## Model for hypothesis H5
+
+Stability of choice which is determined by three consecutive correct decisions made after the social input, is achieved at a lower trial number in advisory conditions as compared to advisory conditions.
+
+```{r Hypothesis H5}
+DetectStability<-function(choices,par){
+  Len=1
+  i=2
+  while (Len<(par)&i<=length(choices)){
+    if (choices[i]==1){
+      if (choices[i]==choices[i-1]){
+      Len=Len+1;
+      }else{
+        Len=1;
+      }
+    }else{
+      Len=1
+    }
+      i=i+1
+  }
+  return(i-1)
+}
+
+
+data_for_fitting_1<-data_for_fitting%>%group_by(id,blocktype)%>%summarise(stable_trial=DetectStability(choice,3),RGPTS_persecution=first(RGPTS_persecution),mean_choice=mean(choice),blocknum=first(blocknum),RGPTS_reference=first(RGPTS_reference))
+
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==1] = "advice"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==2] = "eavesdrop"
+data_for_fitting_1$blocktype[data_for_fitting_1$blocktype==3] = "self"
+
+data_for_fitting_1$blocktype = factor(data_for_fitting_1$blocktype)
+data_for_fitting_1$blocktype = relevel(data_for_fitting_1$blocktype, ref="self")
+
+   
+Stable_Model1= lmer(stable_trial ~  blocktype*RGPTS_persecution+(1 | id), data=data_for_fitting_1) 
+
+   
+  
+summary(Stable_Model1)
+car::Anova(Stable_Model1, type = 'III')
+
+emmeans(Stable_Model1,pairwise~blocktype,pbkrtest.limit = 8000) 
+```
